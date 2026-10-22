@@ -1,0 +1,437 @@
+# =============================================================================
+#  Todo app  -  FastAPI + React + PostgreSQL + full observability stack
+#
+#      docker compose up -d --build          # everything
+#      docker compose --profile perf run --rm k6   # optional load test
+#
+#  App            http://localhost:8080        login: admin@example.com / password123
+#  API docs       http://localhost:8085/docs
+#  Grafana        http://localhost:3000        (metrics dashboard + alerts)
+#  Kibana         http://localhost:5601        (logs + traces)     user: elastic
+#  Mailpit        http://localhost:8025        (alert e-mails land here)
+#  MinIO console  http://localhost:9001        (S3 buckets: metrics + log archive)
+#
+#  Config lives in:  docker/  (postgres init SQL, nginx)   observability/  (everything else)
+#  Defaults are dev-only - override via .env (see .env.example).
+# =============================================================================
+name: todo-app
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &restart
+  restart: unless-stopped
+
+# Grafana/Kibana/ES/collector all share the same S3 credentials in this dev stack.
+x-s3-env: &s3-env
+  S3_ENDPOINT: minio:9000
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change_me_minio_secret}
+
+services:
+  # ===========================================================================
+  #  APPLICATION
+  # ===========================================================================
+  db:
+    image: postgres:17-alpine
+    container_name: todo-db
+    <<: *restart
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-todos}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # *.sql here run once, in name order, when the data volume is empty:
+      #   01-schema.sql      -> tables
+      #   02-seed-admin.sql  -> admin@example.com / password123 (bcrypt hash)
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+  backend:
+    build:
+      context: ./fastapi-todo-backend
+    image: todo-backend:local
+    container_name: todo-backend
+    <<: *restart
+    logging: *default-logging
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-change_me_postgres}@db:5432/${POSTGRES_DB:-todos}
+      JWT_SECRET: ${JWT_SECRET:-change-me-dev-only-jwt-secret-0123456789abcdef}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      SERVICE_NAME: todo-backend
+      LOG_LEVEL: INFO
+      # ---- OpenTelemetry (read by `opentelemetry-instrument`) ----
+      OTEL_SERVICE_NAME: todo-backend
+      OTEL_RESOURCE_ATTRIBUTES: service.version=0.1.0,deployment.environment=${ENVIRONMENT:-local}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
+      OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED: "true"
+      OTEL_PYTHON_LOG_CORRELATION: "true"
+      # stable HTTP semconv -> http.server.request.duration (seconds), http.response.status_code
+      OTEL_SEMCONV_STABILITY_OPT_IN: http
+      # probes must not pollute latency / availability SLIs
+      OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "health"
+      OTEL_PYTHON_EXCLUDED_URLS: "health"
+    depends_on:
+      db:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+        required: false          # the app must still boot if observability is down
+    ports:
+      - ${BACKEND_PORT:-8085}:8085"
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  frontend:
+    build:
+      context: ./fastapi-todo-react-frontend
+      args:
+        VITE_API_BASE_URL: /api
+        VITE_OTEL_ENABLED: "true"
+        VITE_OTEL_TRACES_URL: /otlp/v1/traces
+        VITE_ENVIRONMENT: ${ENVIRONMENT:-local}
+    image: todo-frontend:local
+    container_name: todo-frontend
+    <<: *restart
+    logging: *default-logging
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 128m }
+
+  # ===========================================================================
+  #  TELEMETRY PIPELINE
+  # ===========================================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: todo-otel-collector
+    <<: *restart
+    logging: *default-logging
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      POSTGRES_DB: ${POSTGRES_DB:-todos}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_postgres}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-change_me_elastic}
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      es-setup:
+        condition: service_completed_successfully
+      mimir:
+        condition: service_started
+    ports:
+      - "4317:4317"   # OTLP gRPC  (apps running outside docker can export here)
+      - "4318:4318"   # OTLP HTTP
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  # ===========================================================================
+  #  METRICS  -  Grafana Mimir on S3 (MinIO)
+  # ===========================================================================
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: todo-minio
+    <<: *restart
+    logging: *default-logging
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change_me_minio_secret}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: todo-minio-init
+    depends_on: [minio]
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/create-buckets.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change_me_minio_secret}
+      MIMIR_BLOCKS_BUCKET: ${MIMIR_BLOCKS_BUCKET:-mimir-blocks}
+      MIMIR_RULER_BUCKET: ${MIMIR_RULER_BUCKET:-mimir-ruler}
+      MIMIR_ALERTMANAGER_BUCKET: ${MIMIR_ALERTMANAGER_BUCKET:-mimir-alertmanager}
+      ES_SNAPSHOT_BUCKET: ${ES_SNAPSHOT_BUCKET:-es-log-archive}
+    volumes:
+      - ./observability/minio/create-buckets.sh:/scripts/create-buckets.sh:ro
+
+  mimir:
+    image: grafana/mimir:2.16.0
+    container_name: todo-mimir
+    <<: *restart
+    logging: *default-logging
+    command: ["-config.file=/etc/mimir/mimir.yaml", "-config.expand-env=true"]
+    environment:
+      <<: *s3-env
+      MIMIR_BLOCKS_BUCKET: ${MIMIR_BLOCKS_BUCKET:-mimir-blocks}
+      MIMIR_RULER_BUCKET: ${MIMIR_RULER_BUCKET:-mimir-ruler}
+      MIMIR_ALERTMANAGER_BUCKET: ${MIMIR_ALERTMANAGER_BUCKET:-mimir-alertmanager}
+    volumes:
+      - ./observability/mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro
+      - mimir_data:/data                      # WAL / head block only; long-term blocks live in S3
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "9009:9009"
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 1g }
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: todo-cadvisor
+    <<: *restart
+    logging: *default-logging
+    privileged: true
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service
+      - --disable_metrics=advtcp,cpu_topology,hugetlb,memory_numa,percpu,process,referenced_memory,resctrl,sched,tcp,udp
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8081:8080"
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256m }
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: todo-node-exporter
+    <<: *restart
+    logging: *default-logging
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|run/.+)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+
+  # ===========================================================================
+  #  LOGS  -  Elasticsearch + Kibana, archived to S3 via snapshots
+  # ===========================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: todo-elasticsearch
+    <<: *restart
+    logging: *default-logging
+    entrypoint: ["/bin/bash", "/usr/local/bin/es-entrypoint.sh"]
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-change_me_elastic}
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change_me_minio_secret}
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      - ./observability/elk/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+      - ./observability/elk/elasticsearch/es-entrypoint.sh:/usr/local/bin/es-entrypoint.sh:ro
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -u elastic:$$ELASTIC_PASSWORD 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+    ports:
+      - "9200:9200"
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1536m }
+
+  es-setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: todo-es-setup
+    restart: "no"
+    entrypoint: ["/bin/bash", "/setup/setup-elasticsearch.sh"]
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-change_me_elastic}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD:-change_me_kibana_system}
+      ES_SNAPSHOT_BUCKET: ${ES_SNAPSHOT_BUCKET:-es-log-archive}
+      ES_SNAPSHOT_REPO: ${ES_SNAPSHOT_REPO:-s3-logs-archive}
+      ES_SNAPSHOT_CRON: ${ES_SNAPSHOT_CRON:-0 0 * * * ?}
+    volumes:
+      - ./observability/elk/setup:/setup:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.0
+    container_name: todo-kibana
+    <<: *restart
+    logging: *default-logging
+    environment:
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD:-change_me_kibana_system}
+      KIBANA_ENCRYPTION_KEY: ${KIBANA_ENCRYPTION_KEY:-change-me-kibana-encryption-key-0123456789}
+    volumes:
+      - ./observability/elk/kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    depends_on:
+      es-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 1536m }
+
+  kibana-setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: todo-kibana-setup
+    restart: "no"
+    entrypoint: ["/bin/bash", "/setup/setup-kibana.sh"]
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-change_me_elastic}
+    volumes:
+      - ./observability/elk/setup:/setup:ro
+    depends_on:
+      kibana:
+        condition: service_healthy
+
+  # ===========================================================================
+  #  DASHBOARDS & ALERTING
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: todo-grafana
+    <<: *restart
+    logging: *default-logging
+    environment:
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me_grafana}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-change_me_elastic}
+      ALERT_CPU_THRESHOLD: ${ALERT_CPU_THRESHOLD:-40}
+      ALERT_MEMORY_THRESHOLD: ${ALERT_MEMORY_THRESHOLD:-40}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-oncall@example.com}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-alerts@todo.local}
+      SMTP_STARTTLS_POLICY: ${SMTP_STARTTLS_POLICY:-NoStartTLS}
+      SMTP_SKIP_VERIFY: ${SMTP_SKIP_VERIFY:-true}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      mimir:
+        condition: service_started
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\": \"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  mailpit:
+    image: axllent/mailpit:v1.22
+    container_name: todo-mailpit
+    <<: *restart
+    logging: *default-logging
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+
+  # ===========================================================================
+  #  OPTIONAL: load testing (docker compose --profile perf run --rm k6 [script])
+  #  k6 metrics are remote-written to Mimir, so they show up in Grafana too.
+  # ===========================================================================
+  k6:
+    profiles: ["perf"]
+    image: grafana/k6:0.57.0
+    container_name: todo-k6
+    entrypoint: ["k6"]
+    command: ["run", "-o", "experimental-prometheus-rw", "/tests/performance/k6/load.js"]
+    environment:
+      BASE_URL: http://backend:8085
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: password123
+      K6_PROMETHEUS_RW_SERVER_URL: http://mimir:9009/api/v1/push
+      K6_PROMETHEUS_RW_TREND_STATS: p(95),p(99),avg,max
+    volumes:
+      - ./tests:/tests:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  minio_data:
+  mimir_data:
+  es_data:
+  grafana_data:

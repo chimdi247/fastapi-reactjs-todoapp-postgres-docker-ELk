@@ -1,0 +1,8 @@
+# Test dependencies (python). Install in a venv:  pip install -r tests/requirements.txt
+-r ../fastapi-todo-backend/requirements.txt   # unit tests import the app code
+
+pytest>=8.3
+pytest-timeout>=2.3
+httpx>=0.27
+selenium>=4.25
+psycopg[binary]>=3.2      # DB integrity tests

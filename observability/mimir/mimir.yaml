@@ -1,0 +1,71 @@
+# Grafana Mimir - monolithic mode, blocks/ruler/alertmanager data in S3 (MinIO).
+# Started with:  mimir -config.file=/etc/mimir/mimir.yaml -config.expand-env=true
+# Swap MinIO for real AWS S3 by changing `common.storage.s3` (drop `endpoint`
+# and `insecure`, set `region`, use an IAM role or keys).
+
+target: all
+multitenancy_enabled: false     # single tenant => no X-Scope-OrgID header needed
+usage_stats:
+  enabled: false
+
+server:
+  http_listen_port: 9009
+  grpc_listen_port: 9095
+  log_level: warn
+
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: ${S3_ENDPOINT}              # minio:9000
+      region: ${S3_REGION}
+      access_key_id: ${S3_ACCESS_KEY}
+      secret_access_key: ${S3_SECRET_KEY}
+      insecure: true                        # plain HTTP inside the compose network
+
+blocks_storage:
+  s3:
+    bucket_name: ${MIMIR_BLOCKS_BUCKET}     # long-term metrics (TSDB blocks)
+  tsdb:
+    dir: /data/ingester                     # WAL + head block (local, persisted by a volume)
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+
+ruler_storage:
+  s3:
+    bucket_name: ${MIMIR_RULER_BUCKET}
+
+alertmanager_storage:
+  s3:
+    bucket_name: ${MIMIR_ALERTMANAGER_BUCKET}
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+ruler:
+  rule_path: /data/ruler
+
+limits:
+  compactor_blocks_retention_period: 30d    # how long metrics are kept in the bucket
+  out_of_order_time_window: 5m              # tolerate slightly late samples from the collector
+  max_global_series_per_user: 500000

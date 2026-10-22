@@ -1,0 +1,17 @@
+server.host: 0.0.0.0
+server.name: todo-kibana
+server.publicBaseUrl: http://localhost:5601
+
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+elasticsearch.username: kibana_system
+elasticsearch.password: ${KIBANA_SYSTEM_PASSWORD}
+
+# Stable keys so saved objects / sessions survive container re-creation.
+xpack.security.encryptionKey: ${KIBANA_ENCRYPTION_KEY}
+xpack.encryptedSavedObjects.encryptionKey: ${KIBANA_ENCRYPTION_KEY}
+xpack.reporting.encryptionKey: ${KIBANA_ENCRYPTION_KEY}
+
+telemetry.optIn: false
+telemetry.allowChangingOptInStatus: false
+newsfeed.enabled: false
+logging.root.level: warn

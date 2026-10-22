@@ -1,0 +1,186 @@
+# OpenTelemetry Collector (contrib distribution) - single ingestion point.
+#
+#   apps (OTLP) ─┐                                   ┌─> Mimir  (metrics, S3-backed)
+#   cAdvisor     ├─> receivers ─> processors ─> ─────┼─> Elasticsearch  logs-todo-*   (Kibana)
+#   node-exporter│                                   └─> Elasticsearch  traces-todo-* (Kibana)
+#   httpcheck, nginx, postgresql ─┘
+#
+# Pinned to the 0.116.x line; the exporter options below are valid for it.
+# Env vars (${env:NAME}) are injected by docker-compose.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  # ---- application telemetry (backend: gRPC 4317, browser via nginx: HTTP 4318)
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # ---- container + host + platform metrics scraped Prometheus-style
+  prometheus/infra:
+    config:
+      scrape_configs:
+        - job_name: cadvisor
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["cadvisor:8080"]
+          metric_relabel_configs:
+            # keep only what dashboards/alerts use; drops system cgroups (name="")
+            - source_labels: [__name__]
+              regex: "container_(cpu_usage_seconds_total|memory_working_set_bytes|memory_usage_bytes|memory_rss|spec_memory_limit_bytes|spec_cpu_quota|spec_cpu_period|network_receive_bytes_total|network_transmit_bytes_total|last_seen|oom_events_total)|machine_(cpu_cores|memory_bytes)"
+              action: keep
+            - source_labels: [__name__, name]
+              regex: "container_.*;"
+              action: drop
+
+        - job_name: node-exporter
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["node-exporter:9100"]
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "node_(cpu_seconds_total|memory_(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree)_bytes|filesystem_(avail|size)_bytes|load[0-9]+|network_(receive|transmit)_bytes_total|boot_time_seconds|uname_info)"
+              action: keep
+            - source_labels: [__name__, fstype]
+              regex: "node_filesystem_.*;(tmpfs|overlay|squashfs|devtmpfs)"
+              action: drop
+
+        - job_name: mimir
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["mimir:9009"]
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "up|cortex_ingester_memory_series|cortex_distributor_received_samples_total|cortex_request_duration_seconds_(count|sum)"
+              action: keep
+
+        - job_name: grafana
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["grafana:3000"]
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "up|grafana_alerting_.*|grafana_stat_totals_.*"
+              action: keep
+
+        - job_name: otel-collector
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "up|otelcol_(exporter_(sent|send_failed)_(spans|metric_points|log_records)(_total)?|receiver_accepted_.*|processor_refused_.*)"
+              action: keep
+
+  # ---- black-box uptime probes (feeds the Uptime SLI)
+  httpcheck:
+    collection_interval: 15s
+    targets:
+      - endpoint: http://backend:8085/health/ready
+        method: GET
+      - endpoint: http://frontend/nginx-health
+        method: GET
+      - endpoint: http://grafana:3000/api/health
+        method: GET
+
+  # ---- frontend web server
+  nginx:
+    endpoint: http://frontend:80/nginx_status
+    collection_interval: 15s
+
+  # ---- database
+  postgresql:
+    endpoint: db:5432
+    transport: tcp
+    username: ${env:POSTGRES_USER}
+    password: ${env:POSTGRES_PASSWORD}
+    databases:
+      - ${env:POSTGRES_DB}
+    collection_interval: 30s
+    tls:
+      insecure: true
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 300
+    spike_limit_mib: 80
+
+  resource/common:
+    attributes:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: insert
+
+  batch:
+    send_batch_size: 2048
+    timeout: 5s
+
+exporters:
+  # Metrics -> Grafana Mimir (remote write). Mimir stores blocks in S3 (MinIO).
+  prometheusremotewrite:
+    endpoint: http://mimir:9009/api/v1/push
+    resource_to_telemetry_conversion:
+      enabled: true     # service.name -> service_name label, etc.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 120s
+
+  # Logs -> Elasticsearch (ECS mapping => `message`, `log.level`, `trace.id`, `service.name`)
+  elasticsearch/logs:
+    endpoints: ["http://elasticsearch:9200"]
+    user: elastic
+    password: ${env:ELASTIC_PASSWORD}
+    logs_index: logs-todo-default
+    mapping:
+      mode: ecs
+    flush:
+      interval: 5s
+    retry:
+      enabled: true
+      max_requests: 5
+
+  # Traces -> Elasticsearch (viewable in Kibana Discover; correlate by trace.id)
+  elasticsearch/traces:
+    endpoints: ["http://elasticsearch:9200"]
+    user: elastic
+    password: ${env:ELASTIC_PASSWORD}
+    traces_index: traces-todo-default
+    mapping:
+      mode: ecs
+    flush:
+      interval: 5s
+    retry:
+      enabled: true
+      max_requests: 5
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888
+  pipelines:
+    metrics:
+      receivers: [otlp, prometheus/infra, httpcheck, nginx, postgresql]
+      processors: [memory_limiter, resource/common, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/common, batch]
+      exporters: [elasticsearch/logs]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/common, batch]
+      exporters: [elasticsearch/traces]

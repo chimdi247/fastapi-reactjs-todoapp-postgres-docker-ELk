@@ -1,0 +1,176 @@
+apiVersion: 1
+
+# Grafana-managed alert rules. Notifications go through the `email-oncall`
+# contact point (SMTP configured in grafana.ini) via the default policy.
+#
+# CPU / memory thresholds come from ALERT_CPU_THRESHOLD / ALERT_MEMORY_THRESHOLD
+# (default 40, %). Container rules cover the application tier
+# (backend, frontend, db, otel-collector); widen the `name=~` regex to include
+# Elasticsearch/Kibana, which idle above 40 % of their memory limits by design.
+
+groups:
+  - orgId: 1
+    name: resource-utilization
+    folder: Todo App Alerts
+    interval: 1m
+    rules:
+      - uid: container-cpu-high
+        title: "Container CPU above threshold"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "100 * sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"todo-(backend|frontend|db|otel-collector)\"}[2m])) / on (name) (max by (name) (container_spec_cpu_quota{name=~\"todo-(backend|frontend|db|otel-collector)\"}) / max by (name) (container_spec_cpu_period{name=~\"todo-(backend|frontend|db|otel-collector)\"}) > 0)", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "gt", "params": [$ALERT_CPU_THRESHOLD]}}]}
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "CPU high on container {{ $$labels.name }}"
+          description: "Container {{ $$labels.name }} is using {{ printf \"%.1f\" $$values.B.Value }}% of its CPU limit (threshold ${ALERT_CPU_THRESHOLD}%)."
+        labels:
+          severity: warning
+      - uid: container-memory-high
+        title: "Container memory above threshold"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "100 * max by (name) (container_memory_working_set_bytes{name=~\"todo-(backend|frontend|db|otel-collector)\"}) / (max by (name) (container_spec_memory_limit_bytes{name=~\"todo-(backend|frontend|db|otel-collector)\"}) > 0)", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "gt", "params": [$ALERT_MEMORY_THRESHOLD]}}]}
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "Memory high on container {{ $$labels.name }}"
+          description: "Container {{ $$labels.name }} is using {{ printf \"%.1f\" $$values.B.Value }}% of its memory limit (threshold ${ALERT_MEMORY_THRESHOLD}%)."
+        labels:
+          severity: warning
+      - uid: node-cpu-high
+        title: "Node CPU above threshold"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[2m])))", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "gt", "params": [$ALERT_CPU_THRESHOLD]}}]}
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "CPU high on node {{ $$labels.instance }}"
+          description: "Node {{ $$labels.instance }} CPU is at {{ printf \"%.1f\" $$values.B.Value }}% (threshold ${ALERT_CPU_THRESHOLD}%)."
+        labels:
+          severity: warning
+      - uid: node-memory-high
+        title: "Node memory above threshold"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "gt", "params": [$ALERT_MEMORY_THRESHOLD]}}]}
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "Memory high on node {{ $$labels.instance }}"
+          description: "Node {{ $$labels.instance }} memory is at {{ printf \"%.1f\" $$values.B.Value }}% (threshold ${ALERT_MEMORY_THRESHOLD}%)."
+        labels:
+          severity: warning
+
+  - orgId: 1
+    name: service-slo
+    folder: Todo App Alerts
+    interval: 1m
+    rules:
+      - uid: backend-down
+        title: "Backend unavailable"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "min(avg_over_time(httpcheck_status{http_status_class=\"2xx\",http_url=~\".*backend.*\"}[2m]))", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "lt", "params": [1]}}]}
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "Backend readiness probe failing"
+          description: "The backend /health/ready probe has not returned 2xx for 2 minutes (uptime SLI breach)."
+        labels:
+          severity: critical
+      - uid: backend-error-rate-high
+        title: "Backend 5xx error rate above 5%"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "100 * (sum(rate(http_server_request_duration_seconds_count{job=\"todo-backend\",http_response_status_code=~\"5..\"}[5m])) or vector(0)) / sum(rate(http_server_request_duration_seconds_count{job=\"todo-backend\"}[5m]))", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "gt", "params": [5]}}]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "5xx error rate is {{ printf \"%.2f\" $$values.B.Value }}%"
+          description: "More than 5% of backend requests failed with 5xx over the last 5 minutes (availability SLO at risk)."
+        labels:
+          severity: critical
+      - uid: backend-latency-p95-high
+        title: "Backend p95 latency above 500 ms"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: mimir
+            model: {"refId": "A", "datasource": {"type": "prometheus", "uid": "mimir"}, "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"todo-backend\"}[5m])))", "instant": true, "range": false, "intervalMs": 1000, "maxDataPoints": 43200}
+          - refId: B
+            datasourceUid: __expr__
+            model: {"refId": "B", "type": "reduce", "expression": "A", "reducer": "last", "datasource": {"type": "__expr__", "uid": "__expr__"}, "settings": {"mode": "dropNN"}}
+          - refId: C
+            datasourceUid: __expr__
+            model: {"refId": "C", "type": "threshold", "expression": "B", "datasource": {"type": "__expr__", "uid": "__expr__"}, "conditions": [{"evaluator": {"type": "gt", "params": [0.5]}}]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "p95 latency is {{ printf \"%.3f\" $$values.B.Value }}s"
+          description: "Backend p95 request latency has been above 500 ms for 5 minutes (latency SLO at risk)."
+        labels:
+          severity: warning

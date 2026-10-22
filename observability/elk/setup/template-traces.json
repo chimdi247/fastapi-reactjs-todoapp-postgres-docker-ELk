@@ -1,0 +1,13 @@
+{
+  "index_patterns": ["traces-todo-*"],
+  "data_stream": {},
+  "priority": 500,
+  "template": {
+    "settings": {
+      "index.number_of_shards": 1,
+      "index.number_of_replicas": 0,
+      "index.lifecycle.name": "todo-observability"
+    }
+  },
+  "_meta": { "description": "Distributed traces shipped by the OpenTelemetry Collector" }
+}

@@ -1,0 +1,24 @@
+# Single-node Elasticsearch for the log/trace store.
+cluster.name: todo-logs
+node.name: es01
+network.host: 0.0.0.0
+discovery.type: single-node
+
+# Security on (basic auth). `elastic` password comes from ELASTIC_PASSWORD.
+xpack.security.enabled: true
+xpack.security.http.ssl.enabled: false      # TLS terminates outside / not needed on the compose network
+xpack.security.transport.ssl.enabled: false
+xpack.ml.enabled: false
+xpack.watcher.enabled: false
+
+# Don't spin up a 2nd replica on a 1-node cluster; protect against full disks.
+cluster.routing.allocation.disk.threshold_enabled: true
+action.destructive_requires_name: true
+
+# ---- S3 snapshot repository client (MinIO here; real S3: drop endpoint/protocol
+#      and path_style_access, set s3.client.default.region) -------------------
+# Credentials are NOT in this file: es-entrypoint.sh loads them into the
+# Elasticsearch keystore from S3_ACCESS_KEY / S3_SECRET_KEY.
+s3.client.default.endpoint: minio:9000
+s3.client.default.protocol: http
+s3.client.default.path_style_access: true

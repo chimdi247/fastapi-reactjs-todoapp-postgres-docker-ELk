@@ -1,0 +1,7 @@
+{
+  "name": "todo-frontend-unit-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "vitest run", "test:watch": "vitest" },
+  "devDependencies": { "jsdom": "^26.0.0", "vitest": "^3.0.0" }
+}

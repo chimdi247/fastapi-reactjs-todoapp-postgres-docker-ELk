@@ -1,0 +1,28 @@
+# Runtime dependencies for the container image (mirrors pyproject.toml).
+# asyncmy (MySQL driver) is intentionally omitted - the stack is PostgreSQL.
+# After changing this file, regenerate the lock with `uv lock` if you use uv.
+
+# --- web / db ---
+fastapi>=0.139.0
+uvicorn>=0.51.0
+sqlalchemy>=2.0.51
+asyncpg>=0.31.0
+greenlet>=3.5.3
+alembic>=1.18.5
+pydantic-settings>=2.14.2
+
+# --- auth ---
+bcrypt>=4.2.0
+PyJWT>=2.9.0
+
+# --- OpenTelemetry: API + SDK + auto-instrumentation ---
+opentelemetry-api>=1.44.0
+opentelemetry-sdk>=1.44.0
+opentelemetry-distro>=0.65b0
+opentelemetry-exporter-otlp>=1.44.0
+opentelemetry-instrumentation-fastapi>=0.65b0
+opentelemetry-instrumentation-asgi>=0.65b0
+opentelemetry-instrumentation-starlette>=0.65b0
+opentelemetry-instrumentation-sqlalchemy>=0.65b0
+opentelemetry-instrumentation-logging>=0.65b0
+opentelemetry-instrumentation-system-metrics>=0.65b0
