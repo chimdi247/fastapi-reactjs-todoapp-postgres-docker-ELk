@@ -15,8 +15,13 @@ import { trace, SpanStatusCode } from '@opentelemetry/api'; import { ZoneContext
 
 const enabled = import.meta.env.VITE_OTEL_ENABLED !== 'false';
 
-const configuredEndpoint = import.meta.env.VITE_OTEL_TRACES_URL || '/otlp/v1/traces';
+const configuredEndpoint =
+    import.meta.env.VITE_OTEL_TRACES_URL || '/otlp/v1/traces';
 
+const endpoint = new URL(
+    configuredEndpoint,
+    window.location.origin,
+).toString();
 // The OTLP exporter expects an absolute URL. Resolve relative paths against // the current origin so requests continue to pass through the Nginx proxy. const endpoint = new URL( configuredEndpoint, window.location.origin, ).toString();
 
 if (enabled) { const provider = new WebTracerProvider({ resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: 'todo-frontend', [ATTR_SERVICE_VERSION]: import.meta.env.VITE_APP_VERSION ?? '0.1.0', 'deployment.environment': import.meta.env.VITE_ENVIRONMENT ?? 'local', }), spanProcessors: [ new BatchSpanProcessor( new OTLPTraceExporter({ url: endpoint }), { scheduledDelayMillis: 3000, maxExportBatchSize: 50, }, ), ], });
