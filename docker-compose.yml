@@ -101,7 +101,7 @@ services:
         condition: service_started
         required: false          # the app must still boot if observability is down
     ports:
-      - ${BACKEND_PORT:-8085}:8085"
+      - "${BACKEND_PORT:-8085}:8085"
     deploy:
       resources:
         limits: { cpus: "1.0", memory: 512m }
