@@ -24,13 +24,13 @@ check "backend liveness"          http_ok "$API/health"
 check "backend readiness (DB)"    http_ok "$API/health/ready"
 check "frontend serves SPA"       bash -c "curl -fsS -m 10 $WEB/ | grep -q 'id=\"root\"'"
 check "frontend proxies /api"     http_ok "$WEB/api/health"
-check "anonymous /todos => 401"   bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' $API/todos)\" = 401 ]"
+check "anonymous /todos => 401"   bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' $API/todos/)\" = 401 ]"
 
 TOKEN=$(curl -fsS -m 10 -H 'Content-Type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}" "$API/auth/login" 2>/dev/null \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["access_token"])' 2>/dev/null)
 check "admin login returns token" test -n "$TOKEN"
-check "authenticated /todos"      curl -fsS -m 10 -H "Authorization: Bearer $TOKEN" "$API/todos"
+check "authenticated /todos/"      curl -fsS -m 10 -H "Authorization: Bearer $TOKEN" "$API/todos"
 
 echo "== observability"
 check "grafana healthy"           http_ok "$GRAFANA/api/health"
