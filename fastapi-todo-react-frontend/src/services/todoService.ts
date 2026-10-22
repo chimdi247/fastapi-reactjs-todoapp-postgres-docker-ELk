@@ -12,7 +12,7 @@ export interface Todo {
 export const todoService = {
 
     getAllTodos(): Promise<Todo[]> {
-        return request<Todo[]>('/todos');
+        return request<Todo[]>('/todos/');
     },
 
     getTodoById(id: number): Promise<Todo> {
@@ -20,7 +20,7 @@ export const todoService = {
     },
 
     createTodo(title: string, description: string): Promise<Todo> {
-        return request<Todo>('/todos', { method: 'POST', body: { title, description } });
+        return request<Todo>('/todos/', { method: 'POST', body: { title, description } });
     },
 
     updateTodo(id: number, title: string, description: string, is_completed: boolean): Promise<Todo> {
