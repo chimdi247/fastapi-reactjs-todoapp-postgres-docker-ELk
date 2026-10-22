@@ -162,7 +162,7 @@ services:
   #  METRICS  -  Grafana Mimir on S3 (MinIO)
   # ===========================================================================
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: elestio/minio:latest
     container_name: todo-minio
     <<: *restart
     logging: *default-logging
@@ -179,7 +179,7 @@ services:
         limits: { cpus: "1.0", memory: 512m }
 
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: pgsty/mc:latest
     container_name: todo-minio-init
     depends_on: [minio]
     restart: "no"
